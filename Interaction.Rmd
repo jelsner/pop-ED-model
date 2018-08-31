@@ -1,0 +1,923 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+Models for Tornado Casualty Rates
+=================================
+
+James B. Elsner
+---------------
+
+**Code for the paper: A model for U.S. tornado casualties involving interaction between damage path estimates of population density and energy dissipation
+
+Tornado casualties in the United States: A model involving an interaction between population density and energy dissipation by Elsner, Fricker, Berry.**
+
+Load packages and data.
+```{r}
+suppressMessages(library("ggplot2"))
+suppressMessages(library("raster"))
+suppressMessages(library("ggmap"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("tidyr"))
+suppressMessages(library("rgdal"))
+suppressMessages(library("rgeos"))
+suppressMessages(library("ggthemes"))
+suppressMessages(library("RColorBrewer"))
+suppressMessages(library("scales"))
+suppressMessages(library("broom"))
+suppressMessages(library("maps"))
+suppressMessages(library("sf"))
+suppressMessages(library("xtable"))
+suppressMessages(library("lubridate"))
+#load(file = "Oct8.RData")
+load(file = "Dec27.RData")
+```
+
+## Data and Variables
+
+### Tornado casualties
+
+Data from the Storm Prediction Center (SPC) http://www.spc.noaa.gov/gis/svrgis/.
+```{r, eval=FALSE}
+download.file("http://www.spc.noaa.gov/gis/svrgis/zipped/tornado.zip",
+              "tornado.zip", mode = "wb")
+```
+
+```{r}
+unzip("tornado.zip")
+```
+
+Read the tornado data.
+```{r}
+Torn.sfdf <- st_read(dsn = "torn", 
+                   layer = "torn", 
+                   stringsAsFactors = FALSE)
+```
+
+Add new columns and filter. We only consider tornadoes occurring within the conterminous United States.
+```{r}
+Torn.sfdf <- Torn.sfdf %>%
+  mutate(Date = as.Date(date),
+         Year = yr,
+         cas = inj + fat,
+         Length = len * 1609.34,
+         Width = wid * .9144,
+         Width = ifelse(Width == 0, min(Width[Width > 0]), Width),
+         AreaPath = Length * Width,
+         AreaVortex = pi * (Width/2)^2,
+         Ma = factor(month.abb[mo], levels = month.abb[1:12])) %>%
+  filter(Year >= 1995, st != "HI", st != "AK", st != "PR")
+```
+
+```{r}
+Torn.sfdf %>%
+  filter(cas > 0) %>%
+  summarize(nT = n(),
+            nC = sum(cas),
+            pF = sum(fat)/nC * 100)
+```
+
+During the 22-year period 1995--2016 there are 26,863 tornadoes recorded in the conterminous United States. Of these, 2,208 are linked to 25,968 casualties. Only 6.7 percent of all casualties lead to death. Only 8.2% of all tornadoes produce a casualty.
+```{r}
+df <- as.data.frame(Torn.sfdf) %>%
+  arrange(desc(cas)) %>%
+  dplyr::select(date, time, st, mag, inj, fat, cas)
+head(df)
+```
+
+On average a casualty-producing EF0 tornado results in two casualties, a casualty-producing EF1 tornado results in 3.1 casualties, and a casualty-producing EF2 tornado results in 6.5 casualties.
+```{r}
+as.data.frame(Torn.sfdf) %>%
+  filter(cas > 0) %>%
+  group_by(mag) %>%
+  summarize(cas = sum(cas),
+            nT = n(),
+            fat = sum(fat),
+            inj = sum(inj),
+            avgcas = cas/nT) %>%
+xtable(., digits = 1)
+```
+#### Table 2 Casualties by EF rating.
+
+Casualties by location and size.
+```{r}
+df <- as.data.frame(Torn.sfdf) %>%
+  filter(cas > 0) %>%
+  mutate(label = paste("EF", mag, sep = ""))
+
+states.df <- map_data("state") %>%
+  filter(region != 'alaska',  region != 'district of columbia')
+
+ggplot(states.df, aes(x = long, y = lat, group = group)) +
+  geom_polygon(fill = "white") +
+  geom_path(color = "gray85") +
+  coord_map(project = "polyconic") + 
+  geom_point(aes(x = slon, y = slat, size = cas, group = om), 
+             alpha = .3, data = df) +
+  xlab("") + ylab("") +
+  facet_wrap(~ label, ncol = 2) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        legend.position = "bottom") +
+  scale_size_continuous("Number of\n Casualties")
+```
+
+#### Figure 1 Location of casualty-producing tornadoes (1995--2016) by EF rating.
+
+Alabama had the most casualties (3,937) followed by Oklahoma (2,500), Missouri (2,025), Arkansas (1,759), Texas (1,704), and Tennessee (1,678).
+```{r}
+sfdf <- Torn.sfdf %>%
+  filter(cas > 0) %>%
+  group_by(st) %>%
+  summarize(nT = n(),
+            nC = sum(cas),
+            nF = sum(fat),
+            ratio = nC/nT) %>%
+  arrange(desc(nC))
+st_geometry(sfdf) = NULL #removes the geometry column
+sfdf
+```
+
+Make a choropleth map of fatalities and injuries by state using functions from the **tmap** package. The functions are based on the grammar of graphics, and the syntax resembles the syntax of **ggplot2**.
+```{r}
+library(tmap)
+library(albersusa)
+us_sf <- usa_sf("aeqd") %>%
+  mutate(st = as.character(iso_3166_2))
+
+us_sf <- us_sf %>%
+  filter(st != "AK" & st != "HI")
+
+
+sfdf2 <- Torn.sfdf %>%
+  group_by(st) %>%
+  summarize(nT = n(),
+            nC = sum(cas),
+            nF = sum(fat),
+            nI = sum(inj))
+st_geometry(sfdf2) = NULL
+
+sfdf3 <- left_join(sfdf2, 
+                  as.data.frame(us_sf), by = "st") %>%
+         sf::st_as_sf() %>%
+         select(nT, nC, nF, nI)
+
+tm1 <- tm_shape(sfdf3) +
+  tm_polygons("nI", 
+              border.col = NULL,
+              title = "Injuries",
+              palette = "Purples") +
+  tm_text("nI", size = .5) +
+tm_shape(us_sf) + tm_borders(alpha = .2) +
+  tm_compass() + tm_scale_bar(lwd = .5) +
+  tm_format_Europe2(legend.position = c("left", "bottom"),
+                attr.position = c("left", "bottom")) 
+
+tm2 <- tm_shape(sfdf3) +
+  tm_polygons("nF", 
+              border.col = NULL,
+              title = "Fatalities",
+              palette = "Oranges") +
+  tm_text("nF", size = .5) +
+tm_shape(us_sf) + tm_borders(alpha = .2) +
+  tm_compass() + tm_scale_bar(lwd = .5) +
+  tm_format_Europe2(legend.position = c("left", "bottom"),
+                attr.position = c("left", "bottom")) 
+
+tmap_arrange(tm1, tm2, asp = NA, ncol = 1)
+```
+
+#### Figure 2 Tornado casualties (top: injuries, bottom: fatalities)  by state (1995-2016). All casualties are assigned to the state in which genesis occurred.
+
+Create tornado paths and extract the average population density (people per sq. km under the path). The population data (Gridded Population of the World Volume 4--2010) are on a raster. With the `extract` method and `weights = TRUE` the calculation is done based on percentage of cell under the path. This takes more time. Multiply the average population density by the path area (L x W) to estimate the number of people under the path.
+
+First convert the tornado simple feature data frame to a spatial lines file. Then buffer the track to make a path.
+```{r}
+TornL.sfdf <- Torn.sfdf
+#  filter(cas > 0)
+TornL = as(TornL.sfdf, "Spatial")
+TornP = gBuffer(TornL, byid = TRUE, width = TornL$Width/2, capStyle = "FLAT")
+#TornP$AreaPath = gArea(TornP, byid = TRUE)
+```
+
+### Population density
+
+Population data are obtained from the Gridded Population of the World, version four (GPW, v4) from the Socioeconomic Data and Applications Center at Columbia University, USA. The database contain decennial census density estimates for 1990, 2000, and 2010 represented as people per square kilometer. Densities are based on residential population. The native cell resolution is .0083$^{\circ}$ latitude/longitude, which at 36$^{\circ}$ N latitude means a cell having the dimension of .9 km in the north-south direction and .7 km in the east-west direction. 
+
+Load the population raster(s) and crop to defined extent. Use the `extract` function to obtain the population density. The `projectRaster` and `extract` functions take about 10 minutes per raster. Group years by mid-year of the census year. Assign the population density using the first decennial estimate then successively replace with later estimates by grouped years.
+```{r}
+stime = proc.time()
+PopD2000 = raster("gpw-v4-population-density_2000.tif")
+PopD2010 = raster("gpw-v4-population-density_2010.tif")
+ext = raster::extent(c(-125, -67, 24, 50))
+PopD2000 = crop(PopD2000, ext)
+PopD2010 = crop(PopD2010, ext)
+
+PopD2000p = projectRaster(PopD2000, crs = proj4string(TornP))
+PopD2010p = projectRaster(PopD2010, crs = proj4string(TornP))
+TornP$popD2000 = raster::extract(PopD2000p, TornP, fun = mean, na.rm = TRUE,
+                                       weights = TRUE, normalizeWeights = FALSE)[, 1]
+TornP$popD2010 = raster::extract(PopD2010p, TornP, fun = mean, na.rm = TRUE,
+                                       weights = TRUE, normalizeWeights = FALSE)[, 1]
+TornP$popD = TornP$popD2000
+yearGroup = TornP$yr > 2005
+TornP$popD[yearGroup] = TornP$popD2010[yearGroup]
+
+TornP$pop = TornP$popD * TornP$AreaPath/10^6
+
+Torn.df = as.data.frame(TornP)
+proc.time() - stime
+```
+
+Note: The warning results from tornadoes with paths over areas with no people. It can be safely ignored.
+
+The `popD` attribute for each tornado corresponds to the population density from the nearest decennial estimate so that a tornado that occurred in 1996 uses the 2000 decennial estimate while a tornado that occurred in 2012 uses the 2010 estimate.
+
+For the set of 2208 tornadoes with at least one casualty the median population density per tornado is 31.3 people per square kilometer with an inter-quartile range between 9.6 and 136 people per square kilometer.
+
+1 mi^2 = 2.589988 km^2
+http://mcdc.missouri.edu/TenThings/urbanrural.shtml
+
+```{r}
+Torn.df %>%
+  summarize(nT = n(),
+            avgPopD = mean(popD),
+            medianPopD = median(popD),
+            q25 = quantile(popD, probs = .25),
+            q75 = quantile(popD, probs = .75),
+            maxPopD = max(popD),
+            minPopD = min(popD)) %>%
+  t()
+
+Torn.df %>%
+  dplyr::select(date, st, mag, inj, fat, cas, popD) %>%
+  arrange(desc(popD)) %>%
+  head(., n = 10) %>%
+  xtable(., digits = 0)
+
+sum(Torn.df$popD == 0)
+
+df = Torn.df %>%
+  filter(yr >= 1990 & yr <= 2001) %>%
+  summarize(totalPop = sum(pop))
+```
+
+Annual average number of people exposed to tornadoes that caused at least one casualty.
+```{r}
+df = Torn.df %>%
+  filter(cas > 0) %>%
+  group_by(Year) %>%
+  summarize(nT = n(),
+            mPop = mean(pop),
+            sdPop = sd(pop),
+            sePop = sdPop/sqrt(nT),
+            mPopm = mPop - sePop,
+            mPopp = mPop + sePop)
+A = ggplot(df, aes(x = Year, y = mPop)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mPopm, ymax = mPopp), width = .2) +
+  scale_y_continuous(limits = c(0, 2500)) +
+  scale_x_continuous(breaks = seq(1995, 2016, 4)) +
+  xlab("Year") + ylab("Number of People Exposed") +
+  theme_minimal()
+```
+
+Distribution of population and population density by EF rating.
+```{r}
+PeopleByEF = Torn.df %>%
+  group_by(mag) %>%
+  summarize(nT = n(),
+            medPL = round(median(Length), 2) / 1000,
+            nP = round(sum(pop), 0),
+            avgP = round(mean(pop), 0),
+            medP = round(median(pop), 0),
+            avgPD = mean(popD),
+            medPD = median(popD))
+sum(PeopleByEF$nP)
+xtable(PeopleByEF, digits = 0)
+
+as.data.frame(Torn.sfdf) %>%
+  group_by(mag) %>%
+  summarize(nT = n(),
+            medPL = round(median(Length), 2) / 1000)
+  
+
+PeopleByEFc = Torn.df %>%
+  filter(cas > 0) %>%
+  group_by(mag) %>%
+  summarize(nT = n(),
+            medPL = round(median(Length), 0),
+            nP = round(sum(pop), 0),
+            avgP = round(mean(pop), 0),
+            medP = round(median(pop), 0),
+            avgPD = mean(popD),
+            medPD = median(popD))
+sum(PeopleByEFc$nP)
+xtable(PeopleByEFc, digits = 0)
+```
+
+#### Table 3: Population and population density by EF rating
+
+Distribution of population density in the path of casualty-producing tornadoes.
+```{r}
+df = Torn.df %>%
+  filter(cas > 0) %>%
+  filter(popD > 0) %>%
+  group_by(mag) %>%
+  summarize(pop = sum(pop),
+            nT = n(),
+            avgpop = pop/nT)
+
+df = Torn.df %>%
+  filter(cas > 0)
+B = ggplot(df[df$popD > 0, ], aes(popD)) +
+  geom_histogram(binwidth = .5, color = "white") +
+  scale_x_log10(breaks = c(.01, .1, 1, 10, 100, 1000, 10000), 
+                labels = c(".01", ".1", "1", "10", "100", "1000", "10,000")) +
+  xlab(expression(paste("Population Density [people/", km^{2}, "]"))) +
+  scale_y_continuous(limits = c(0, 600)) +
+  ylab("Number of Tornadoes") +
+  theme_minimal()
+```
+
+### Energy dissipation
+
+Empirical model for tornado winds by EF rating taken from Table 3-1 of NRC 2007. Percent area by EF rating for each EF category. Threshold wind speeds (m/s) are a lower bound 3 sec gusts on the operational EF Scale (Table 2-1 of NRC2007).
+```{r}
+perc = c(1, 0, 0, 0, 0, 0, 
+         .772, .228, 0, 0, 0, 0,
+         .616, .268, .115, 0, 0, 0,
+         .529, .271, .133, .067, 0, 0,
+         .543, .238, .131, .056, .032, 0,
+#         .3, .2, .2, .15, .1, .05)    # adjust the model for EF5 tornadoes
+         .538, .223, .119, .07, .033, .017)
+percM = matrix(perc, ncol = 6, byrow = TRUE)
+```
+
+Compute energy dissipation. $E = A_p \rho \sum_{j=0}^{J} w_j v_j^{3},$ where $A_p$ is the area of the path, $\rho$ is area density [1 kg/m^3]  $v_j$ is the midpoint wind speed for each rating, and $w_j$ is the corresponding fraction of path area by EF rating. With no upper bound on the EF5 wind speeds, the midpoint wind speed is set at 97 m~s$^{-1}$ (7.5 m~s$^{-1}$ above the threshold wind speed consistent with the EF4 midpoint speed relative to its threshold).
+```{r}
+Torn.df = Torn.df %>%
+  filter(cas > 0)
+threshW = c(29.06, 38.45, 49.62, 60.8, 74.21, 89.41)
+midptW = c(diff(threshW)/2 + threshW[-length(threshW)], threshW[length(threshW)] + 7.5)
+ef = Torn.df$mag + 1
+EW3 = numeric()
+for(i in 1:length(ef)) EW3[i] = midptW^3 %*% percM[ef[i], ]
+Torn.df = Torn.df %>%
+  mutate(ED = EW3 * AreaPath)
+```
+
+Annual energy dissipation of tornadoes with at least one casualty.
+```{r}
+df = Torn.df %>%
+  group_by(Year) %>%
+  summarize(nT = n(),
+            mED = mean(ED),
+            sdED = sd(ED),
+            seED = sdED/sqrt(nT),
+            mEDm = mED - seED,
+            mEDp = mED + seED)
+
+C = ggplot(df, aes(x = Year, y = mED/10^9)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mEDm/10^9, ymax = mEDp/10^9), width = .2) +
+  scale_y_continuous(limits = c(-.15, NA)) +
+  scale_x_continuous(breaks = seq(1995, 2016, 4)) +
+  xlab("Year") + ylab("Energy Dissipation [GW]") +
+  theme_minimal() 
+```
+
+Distribution of energy dissipation.
+```{r}
+D = ggplot(Torn.df, aes(ED)) +
+  geom_histogram(binwidth = .5, color = "white") +
+  scale_x_log10(breaks = c(10^8, 10^10, 10^12, 10^14),
+                labels = c(".1", "10", "1000", "10,000")) +
+  xlab("Energy Dissipation [GW]") +
+  scale_y_continuous(limits = c(0, 600)) +
+  ylab("Number of Tornadoes") +
+  theme_minimal()
+```
+
+Combine figures.
+```{r}
+source("multiplot.txt")
+mtrx <- matrix(c(1, 2, 3, 4), nrow = 2, byrow = TRUE)
+A <- A + ggtitle("A") + 
+  theme(plot.title = element_text(hjust = -.03))
+B <- B + ggtitle("B") + 
+  theme(plot.title = element_text(hjust = 0))
+C <- C + ggtitle("C") + 
+  theme(plot.title = element_text(hjust = 0))
+D <- D + ggtitle("D") + 
+  theme(plot.title = element_text(hjust = 0))
+multiplot(A, B, C, D, layout = mtrx)
+```
+
+#### Figure 3 People exposed and energy dissipation for all casualty-producing tornadoes (1995-2016). (A) Annual average number of people exposed per tornado, (B) distribution of per tornado population density, (C) annual average energy dissipation per tornado, and (D) distribution of per tornado energy dissipation.
+
+For the set of 2208 tornadoes with at least one casualty the median energy dissipation is 95.5 gigawatt with an inter-quartile range between 14 and 511 GW. The Tallulah-Yazoo City-Durant tornado (Louisiana and Mississippi) of 24 April 2010 that killed ten and injured 146 has the highest energy dissipation at 66.2 TW (10^12 W).
+```{r}
+Torn.df %>%
+  filter(popD > 0) %>%
+  summarize(nT = n(),
+            avgED = mean(ED)/10^9,
+            medianED = median(ED)/10^9,
+            q25 = quantile(ED, probs = .25)/10^9,
+            q75 = quantile(ED, probs = .75)/10^9,
+            maxED = max(ED)/10^9,
+            minED = min(ED)/10^9)
+
+Torn.df %>%
+  dplyr::select(date, st, mag, inj, fat, cas, popD, ED) %>%
+  arrange(desc(ED)) %>%
+  head(., n = 10) %>%
+  xtable(., digits = 1)
+```
+
+Here we use logarithms to simplify the number and complexity of "interaction" terms (of the model). cf: Cobb-Douglas production function in economics?
+```{r}
+df = Torn.df %>%
+  filter(popD > 0) %>%
+  arrange(cas)
+p = ggplot(df, aes(x = popD, y = ED, color = log10(cas))) + 
+  scale_color_continuous(low = 'green', high = 'red', labels = c("1", "10", "100", "1000")) +
+  geom_point() + 
+  scale_x_log10(breaks = c(.01, .1, 1, 10, 100, 1000, 10000), 
+                labels = c(".01", ".1", "1", "10", "100", "1000", "10,000")) +
+  scale_y_log10(breaks = c(10^7, 10^8, 10^9, 10^10, 10^11, 10^12, 10^13, 10^14),
+                labels = c(".01", ".1", "1", "10", "100", "1000", "10,000", "100,000")) +
+  xlab(expression(paste("Population Density [people/", km^{2}, "]"))) +
+  ylab("Energy Dissipation [GW]") +
+  labs(color = "Tornado\nCasualties") +
+  theme_bw() +
+  theme(legend.position = c(.01, .99),
+        legend.justification = c(.01, .99))
+
+xx = c(8, 150, 1500, 1500, 10, 1.4, 1.4)
+yy = c(10^13, 10^13, 10^11.7, 10^9, 10^9, 10^10, 10^12)
+poly.df = data.frame(xx, yy)
+
+p + geom_polygon(data = poly.df, aes(x = xx, y = yy), 
+                 col = "grey", fill = "transparent", 
+                 size = 1.2) +
+  geom_text(aes(x = 1.4, y = 10^6.9, label = "1.4"), col = "grey") +
+  geom_text(aes(x = 1500, y = 10^6.9, label = "1500"), col = "grey") +
+  geom_text(aes(x = 1.4, y = 10^6.5, label = "C"), col = "grey") +
+  geom_text(aes(x = 1500, y = 10^6.5, label = "D"), col = "grey") +
+  geom_text(aes(x = 60000, y = 10^9, label = "1 B", hjust = "right"), col = "grey") +
+  geom_text(aes(x = 60000, y = 10^13, label =  "10,000 A", hjust = "right"), col = "grey") +
+  geom_segment(aes(x = 1.4, xend = 1.4,  y = 10^10, yend = 10^7.1), 
+               col = "grey", linetype = 2) +
+  geom_segment(aes(x = 1500, xend = 1500,  y = 10^9, yend = 10^7.1), 
+               col = "grey", linetype = 2) +
+  geom_segment(aes(x = 150, xend = 7000,  y = 10^13, yend = 10^13), 
+               col = "grey", linetype = 2) +
+  geom_segment(aes(x = 1500, xend = 25000,  y = 10^9, yend = 10^9), 
+               col = "grey", linetype = 2)
+```
+
+#### Figure 4: Tornado casualties as a function of population density and energy dissipation on a log-log plot. The number of casualties is color coded on a logarithmic scale.
+
+Population and casualties and energy dissipation and casualties. There are seven orders of magnitude separating the lowest from the highest per-tornado energy dissipation. There are five orders of magnitude separating the lowest from highest per-tornado population density.
+
+Determine the number and proportion of casualty-producing tornadoes within the polygon area depicted in Figure 4.
+```{r}
+Torn.df %>%
+  filter(popD >= 1.4 & popD <= 1500) %>%
+  summarize(nT = n(),
+            pT = nT/2192)
+Torn.df %>%
+  filter(ED <= 10^13 & ED >= 10^9) %>%
+  summarize(nT = n(),
+            pT = nT/2192)
+Torn.df %>%
+  filter(ED <= 10^13 & ED >= 10^9 & popD >= 1.4 & popD <= 1500) %>%
+  summarize(nT = n(),
+            pT = nT/2192)
+library(sp)
+library(sf)
+
+points <- data.frame(xT = Torn.df$popD, yT = Torn.df$ED)
+sp2 <- SpatialPoints(points)
+sp2.sf <- st_as_sf(sp2)
+
+xx <- c(xx, xx[1])
+yy <- c(yy, yy[1])
+p1 <- cbind(xx, yy)
+sp1.sf <- st_polygon(list(p1))
+
+tf <- st_within(sp2.sf, sp1.sf, sparse = FALSE)
+sum(tf)
+sum(tf[, 1])/2192
+```
+
+Correlation between ED and popD.
+```{r}
+Torn.df %>%
+  group_by(mag) %>%
+  summarize(nT = n(),
+            totalED = sum(ED)/10^12,
+            avgED = mean(ED)/10^12,
+            medED = median(ED)/10^12)
+
+Torn.df %>%
+  filter(popD > 0) %>%
+  mutate(lED10 = log10(ED),
+         lpopD10 = log10(popD),
+         lED = log(ED),
+         lpopD = log(popD)) %>%
+  summarize(r1 = cor(ED, popD, method = "p"),
+            r2 = cor(ED, popD, method = "s"),
+            r3 = cor(lED10, lpopD10),
+            r4 = cor(lED, lpopD))
+```
+
+## Results
+
+### Descriptive statistics
+
+Summary statistics. Descriptive statistics for dependent and independent variables used in the regresion models, 1995--2016 (N = 2,192)
+```{r}
+Torn.df %>%
+  filter(popD > 0) %>%
+  summarize(nT = n(),
+            casM = mean(cas),
+            casMedian = median(cas),
+            casMax = max(cas),
+            casMin = min(cas),
+            casSD = sd(cas),
+            popDM = mean(popD),
+            popDMedian = median(popD),
+            popDQ25 = quantile(popD, prob = .25),
+            popDQ75 = quantile(popD, prob = .75),
+            popDMax = max(popD),
+            popDMin = min(popD),
+            popDSD = sd(popD),
+            EDM = mean(ED),
+            EDMedian = median(popD),
+            EDMax = max(ED),
+            EDMin = min(ED),
+            EDSD = sd(ED)) %>%
+  t() %>%
+xtable(., digits = 3)
+```
+
+#### Table 1 Descriptive statistics for the variables used in the regression model.
+
+### Casualty model
+
+Mean and variance of casualty counts.
+```{r}
+Torn.df %>%
+  filter(popD > 0) %>%
+  summarize(meanCas = mean(cas),
+            varCas = var(cas),
+            ratio = varCas/meanCas)
+```
+
+For the set of tornadoes with at least one casualty, the mean and variance of the counts are 11.8 and 2826, respectively suggesting a negative binomial model for counts.
+
+Use the `glm.nb` function from the **MASS** package to fit the model and get the estimate for `theta`. Use natural logs for the modeling.
+```{r}
+df = Torn.df %>%
+  filter(popD > 0) %>%
+  mutate(lpopD = log(popD),
+         lpop = log(pop),
+         lED = log(ED),
+         lpopD10 = log10(popD),
+         lED10 = log10(ED))
+# df$lpop[df$om == 296616] <- log(14795)  #Adjust Joplin population footprint
+
+formula0 = fat ~ lpop + lED 
+formula1 = fat ~ lpop + lED + lpop:lED
+
+suppressMessages(library(MASS))
+model0a = glm.nb(formula0, data = df, link = log, init.theta = 1)
+model0 = glm(formula0, data = df, family = neg.bin(theta = model0a$theta))
+
+model1a = glm.nb(formula1, data = df, link = log, init.theta = 1)
+model1 = glm(formula1, data = df, family = neg.bin(theta = model1a$theta))
+
+pre0 = predict.glm(model0, type = "response")
+pre1 = predict.glm(model1, type = "response")
+
+df$pre0 = pre0
+df$pre1 = pre1
+
+cor(df$pre0, df$cas)
+cor(df$pre1, df$cas)
+
+sqrt(mean((df$pre0 - df$cas)^2)) 
+sqrt(mean((df$pre1 - df$cas)^2))
+
+mean(abs(df$pre0 - df$fat))
+mean(abs(df$pre1 - df$fat))
+
+summary(model1)
+summary(model0)
+
+AIC(model0)
+AIC(model1)
+BIC(model0)
+BIC(model1)
+```
+
+#### Table 4 Table of coefficients for an interactive and additive models fit to the per-tornado casualty counts.
+
+Compare mean absolute errors for the April 27, May 22, and May 24, 2011 EF4 and EF5 tornadoes that resulted in at least one fatality to match Table 7 of Masoomi and van de Lindt (2017). Change the code chunk above: 1. Used `pop` rather than `popD`. This results in better dispersion when predicting. Also change `cas` to `fat` as that is the response variable used in Simmons and Sutter (2014) and Masoomi and van de Lindt (2017). Then in the code below keep only tornadoes with mag >= 4 and fat > 0 on the selected dates.
+```{r}
+dts <- as.Date(c("2011-04-27", "2011-05-22", "2011-05-24"))
+df2 <- df %>% 
+  filter(Date %in% dts) %>%
+  filter(mag >= 4 & fat > 0) 
+df2 %>%  summarize(MAD1 = mean(abs(pre1 - fat)),
+                   MAD0 = mean(abs(pre0 - fat)),
+                   MRE1 = mean(abs(pre1 - fat)/fat * 100),
+                   MRE0 = mean(abs(pre0 - fat)/fat * 100))
+```
+
+       MAD      MRE
+1 16.44872 72.28314
+
+Our numbers compare with 20.8 and 110 for SS2014 and 19.7 and 78 for MvL2017. Increasing the Joplin population from 4600 to 14795 increases predicted fatalities from 5 to 7. The issue with the large under prediction for this event has much more to do with fatality clustering than with getting the path exactly correct. This points to the limitation of tornado-level model of casualties. Improvements could be made by modeling at the per-person level.
+
+Marginal effects. Use the **interplot** package.  Find the value of popD that would make predicted energy elasticity from the interactive model equal to the (constant) predicted energy elasticity from the additive model and find the value of ED that would make predicted population elasticity from the interactive model equal to the (constant) predicted population elasticity from the additive model.
+
+```{r}
+suppressMessages(library(interplot))
+A5 = interplot(m = model1, var1 = "lED", var2 = "lpopD", hist = TRUE) +
+    scale_x_continuous(breaks = log(c(.01, 1, 100, 10000)), 
+                       labels = c(".01", "1", "100", "10,000")) +
+    scale_y_continuous(breaks = c(-.5, -.25, 0, .25, .5, .75, 1)) +
+#    geom_vline(xintercept = -1.5, col = "green") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_segment(aes(y = coef(model0)[3], yend = coef(model0)[3],
+                 x = range(df$lpopD)[1], xend = range(df$lpopD)[2]),
+                 col = "red") +
+    xlab(expression(paste("Population Density [people/", km^{2}, "]"))) +
+    ylab("Energy Elasticity") +
+    theme_bw() 
+
+out.df = interplot(m = model1, var1 = "lED", var2 = "lpopD", plot = FALSE)
+approx(x = out.df$lpopD, y = out.df$coef, xout = log(100))$y
+approx(x = out.df$lpopD, y = out.df$ub, xout = log(100))$y
+approx(x = out.df$lpopD, y = out.df$lb, xout = log(100))$y
+
+approx(x = out.df$lpopD, y = out.df$coef, xout = log(1.4))$y
+approx(x = out.df$lpopD, y = out.df$ub, xout = log(1.4))$y
+approx(x = out.df$lpopD, y = out.df$lb, xout = log(1.4))$y
+approx(x = out.df$lpopD, y = out.df$coef, xout = log(1500))$y
+approx(x = out.df$lpopD, y = out.df$ub, xout = log(1500))$y
+approx(x = out.df$lpopD, y = out.df$lb, xout = log(1500))$y
+
+
+(2^approx(x = out.df$lpopD, y = out.df$coef, xout = log(100))$y - 1) * 100
+approx(x = out.df$lpopD, y = out.df$coef, xout = log(1000))$y
+exp(approx(x = out.df$lb, y = out.df$lpopD, xout = 0)$y) #popD when lb above zero
+sum(df$lpopD > approx(x = out.df$lb, y = out.df$lpopD, xout = 0)$y)/length(df$lpopD) #% obs
+
+exp(approx(x = out.df$coef, y = out.df$lpopD, xout = coef(model0)[3])$y) 
+
+
+B5 = interplot(m = model1, var1 = "lpopD", var2 = "lED", hist = TRUE) +
+    scale_x_continuous(breaks = log(c(10^7, 10^9, 10^11, 10^13)),
+                       labels = c(".01", "1", "100", "10,000")) +
+    scale_y_continuous(breaks = c(-.5, -.25, 0, .25, .5, .75, 1)) +
+#    geom_vline(xintercept = 9.35, col = "green") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_segment(aes(y = coef(model0)[2], yend = coef(model0)[2],
+                 x = range(df$lED)[1], xend = range(df$lED)[2]),
+                 col = "red") +
+    xlab("Energy Dissipation [GW]") +
+    ylab("Population Elasticity") +
+    theme_bw()
+
+sum(Torn.df$ED > 2.1e9 & tf)/2192
+sum(Torn.df$ED > 2.1e9)/2192
+
+out.df = interplot(m = model1, var1 = "lpopD", var2 = "lED", plot = FALSE)
+out.df[1, ]
+
+approx(x = out.df$lED, y = out.df$coef, xout = log(10^9))$y
+approx(x = out.df$lED, y = out.df$ub, xout = log(10^9))$y
+approx(x = out.df$lED, y = out.df$lb, xout = log(10^9))$y
+
+approx(x = out.df$lED, y = out.df$coef, xout = log(10^13))$y
+approx(x = out.df$lED, y = out.df$ub, xout = log(10^13))$y
+approx(x = out.df$lED, y = out.df$lb, xout = log(10^13))$y
+
+
+exp(approx(x = out.df$lb, y = out.df$lED, xout = 0)$y)/10^9 #ED when lb above zero
+sum(df$lED > approx(x = out.df$lb, y = out.df$lED, xout = 0)$y)/length(df$lED) #% obs
+approx(x = out.df$lED, y = out.df$coef, xout = log(10^13))$y
+
+exp(approx(x = out.df$coef, y = out.df$lED, xout = coef(model0)[2])$y) 
+
+mtrx = matrix(c(1, 2), nrow = 2, byrow = TRUE)
+A5 = A5 + ggtitle("A") + 
+  theme(plot.title = element_text(hjust = 0))
+B5 = B5 + ggtitle("B") + 
+  theme(plot.title = element_text(hjust = 0))
+multiplot(A5, B5, layout = mtrx)
+```
+
+#### Figure 5 Marginal effects plots. Relative percentage of observations are shown as a histogram along the horizontal axis.
+
+The predicted casualty rate (and the upper and lower boundaries for this point estimate) at each of 9 combinations of values for energy dissipation (ED) and population density (PD). The `allEffects()` function is needed to get the lower and upper 95% uncertainty points on the prediction not available from the `predict.glm()` function. Also the value of ED that makes predicted population elasticity from the interactive model equal to the (constant) predicted population elasticity from the additive model and the value PD that makes the predicted energy elasticity from the interactive model equalt to the (constant) predicted population elasticity from the additive model.
+```{r}
+library(effects)
+# the minimum value of ED and the minimum value of PD
+predict.glm(model1, newdata = data.frame(lED = min(df$lED), lpopD = min(df$lpopD)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(min(df$lED), min(df$lED) + 1, 1), 
+                                        lpopD = seq(min(df$lpopD), min(df$lpopD) + 1, 1)))
+as.data.frame(eff[[1]])[1, ]
+
+# the minimum value of ED and the maximum value of PD
+predict.glm(model1, newdata = data.frame(lED = min(df$lED), lpopD = max(df$lpopD)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(min(df$lED), min(df$lED) + 1, 1), 
+                                        lpopD = seq(max(df$lpopD) - 1, max(df$lpopD), 1)))
+as.data.frame(eff[[1]])[2, ]
+
+# the maximum value of ED and the minimum value of PD
+predict.glm(model1, newdata = data.frame(lED = max(df$lED), lpopD = min(df$lpopD)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(max(df$lED) - 1, max(df$lED), 1), 
+                                        lpopD = seq(min(df$lpopD), min(df$lpopD) + 1, 1)))
+as.data.frame(eff[[1]])[3, ]
+
+#the maximum value of ED and the maximum value of PD
+predict.glm(model1, newdata = data.frame(lED = max(df$lED), lpopD = max(df$lpopD)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(max(df$lED) - 1, max(df$lED), 1), 
+                                        lpopD = seq(max(df$lpopD) - 1, max(df$lpopD), 1)))
+as.data.frame(eff[[1]])[4, ]
+
+#the 10th percentile value of ED and the 10th percentile value of PD
+predict.glm(model1, newdata = data.frame(lED = quantile(df$lED, prob = .1), lpopD = quantile(df$lpopD, prob = .1)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(quantile(df$lED, prob = .1), quantile(df$lED, prob = .1) + 1, 1), 
+                                        lpopD = seq(quantile(df$lpopD, prob = .1), quantile(df$lpopD, prob = .1) + 1, 1)))
+as.data.frame(eff[[1]])[1, ]
+
+# the 10th percentile value of ED and the 90th percentile value of PD
+predict.glm(model1, newdata = data.frame(lED = quantile(df$lED, prob = .1), lpopD = quantile(df$lpopD, prob = .9)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(quantile(df$lED, prob = .1), quantile(df$lED, prob = .1) + 1, 1), 
+                                        lpopD = seq(quantile(df$lpopD, prob = .9), quantile(df$lpopD, prob = .9) + 1, 1)))
+as.data.frame(eff[[1]])[1, ]
+
+# the 90th percentile value of ED and the 10th percentile value of PD
+predict.glm(model1, newdata = data.frame(lED = quantile(df$lED, prob = .9), lpopD = quantile(df$lpopD, prob = .1)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(quantile(df$lED, prob = .9), quantile(df$lED, prob = .9) + 1, 1), 
+                                        lpopD = seq(quantile(df$lpopD, prob = .1), quantile(df$lpopD, prob = .1) + 1, 1)))
+as.data.frame(eff[[1]])[1, ]
+
+# the 90th percentile value of ED and the 90th percentile value of PD
+predict.glm(model1, newdata = data.frame(lED = quantile(df$lED, prob = .9), lpopD = quantile(df$lpopD, prob = .9)), type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(quantile(df$lED, prob = .9),
+                                                  quantile(df$lED, prob = .9) + 1, 1), 
+                                        lpopD = seq(quantile(df$lpopD, prob = .9), quantile(df$lpopD, prob = .9) + 1, 1)))
+as.data.frame(eff[[1]])[1, ]
+
+predict.glm(model1, newdata = data.frame(lED = 24.70051, lpopD = 3.741267), 
+            type = "response")
+eff = allEffects(model1, xlevels = list(lED = seq(24.70051, 24.70051 + 1, 1), 
+                                        lpopD = seq(3.741267, 3.741267 + 1, 1)))
+as.data.frame(eff[[1]])[1, ]
+```
+
+Repeat for the additive model.
+```{r}
+newData = data.frame(lpopD = c(min(df$lpopD), max(df$lpopD), min(df$lpopD), max(df$lpopD), 
+                               quantile(df$lpopD, prob = .1), quantile(df$lpopD, prob = .9), quantile(df$lpopD, prob = .1), quantile(df$lpopD, prob = .9),   
+                               3.741267),
+                     lED = c(min(df$lED), min(df$lED), max(df$lED), max(df$lED),
+                             quantile(df$lED, prob = .1), quantile(df$lED, prob = .1), quantile(df$lED, prob = .9), quantile(df$lED, prob = .9),
+                             24.70051))
+predict.glm(model0, newdata = newData, type = "response", se.fit = TRUE)
+```
+
+Absolute value of predicted differences.
+```{r}
+pg = data.frame(DeltaC = predict.glm(model1, type = "response") - 
+                         predict.glm(model0, type = "response"))
+pg$DeltaCA = abs(pg$DeltaC)
+mean(pg$DeltaCA)
+median(pg$DeltaCA)
+
+sum(pg$DeltaCA > 3)/length(pg$DeltaCA)
+sum(pg$DeltaCA > 5)/length(pg$DeltaCA)
+sum(pg$DeltaCA > 10)
+sum(pg$DeltaCA > 10)/length(pg$DeltaCA)
+
+pgP = pg %>%
+  filter(DeltaC > .5)
+pgM = pg %>%
+  filter(DeltaC < .5)
+
+ggplot(pg, aes(x = DeltaC)) +
+  geom_histogram(binwidth = 2, col ="black") +
+  scale_x_continuous(breaks = seq(-15, 40, 5), labels = seq(-15, 40, 5)) +
+  ylab("Number of Tornadoes") +
+  xlab("Interaction Model Predictions Minus Additive Model Predictions")
+```
+
+Multiply pop density in people/sq km by 2.59 to get pop density in people / sq miles. 373 * 2.59 = 966 ~ population density of Fort Smith, Arkansas. Kent, Ohio at 954 people / sq. mi. Fort Wayne, Indiana at 959 people / sq. mi http://zipatlas.com/us/in/city-comparison/population-density.htm
+
+In each panel what are the 10th and 90th percentile values in the distribution of the X-axis variable? Also, what is the predicted point estimate of the elasticity and the upper and lower boundaries for the confidence band at these 10th and 90th percentile values.
+```{r}
+quantile(df$popD, probs = c(.1, .9))
+quantile(df$ED, probs = c(.1, .9))
+```
+
+3.346, 585.4 people/sq. km
+2.17 x 10^9 and 2.02 x 10^12 Watts
+
+```{r}
+quantile(df$popD, probs = c(.1, .9))
+quantile(df$ED, probs = c(.1, .9))
+```
+
+```{r}
+A = interplot(m = model1, var1 = "lED", var2 = "lpopD", plot = FALSE, ci = .95)
+
+round(approx(A$lpopD, A$coef, xout = quantile(df$lpopD, probs = .1))$y, 4)
+round(approx(A$lpopD, A$lb, xout = quantile(df$lpopD, probs = .1))$y, 4)
+round(approx(A$lpopD, A$ub, xout = quantile(df$lpopD, probs = .1))$y, 4)
+
+round(approx(A$lpopD, A$coef, xout = quantile(df$lpopD, probs = .9))$y, 4)
+round(approx(A$lpopD, A$lb, xout = quantile(df$lpopD, probs = .9))$y, 4)
+round(approx(A$lpopD, A$ub, xout = quantile(df$lpopD, probs = .9))$y, 4)
+```
+
+```{r}
+B = interplot(m = model1, var1 = "lpopD", var2 = "lED", plot = FALSE, ci = .95)
+
+round(approx(B$lED, B$coef, xout = quantile(df$lED, probs = .1))$y, 4)
+round(approx(B$lED, B$lb, xout = quantile(df$lED, probs = .1))$y, 4)
+round(approx(B$lED, B$ub, xout = quantile(df$lED, probs = .1))$y, 4)
+
+round(approx(B$lED, B$coef, xout = quantile(df$lED, probs = .9))$y, 4)
+round(approx(B$lED, B$lb, xout = quantile(df$lED, probs = .9))$y, 4)
+round(approx(B$lED, B$ub, xout = quantile(df$lED, probs = .9))$y, 4)
+```
+
+Use the **effects** package to get marginal predictions witht the `effects` function. `theta` in the `neg.bin` argument is determined by the `glm.nb` function above.
+```{r}
+suppressMessages(library(effects))
+eff = allEffects(model1, xlevels = list(lED = log(10^seq(9, 13, .1)), 
+                                        lpopD = log(c(1.4, 31.9, 1500))))
+
+results1 = as.data.frame(eff[[1]]) %>%
+  mutate(popD = round(exp(lpopD), 1),
+         ED = exp(lED),
+         lbl = paste("Population Density", popD, 
+                                "[people/sq. km]", sep = " "))
+
+fit0 = predict(model0, 
+               newdata = data.frame(lpopD = results1$lpopD, lED = results1$lED),
+               type = "response")
+
+results1$fit0 = fit0
+
+ggplot(results1, aes(x = ED, y = fit, color = as.factor(popD))) +
+  geom_line(size = 2) +
+#  geom_line(aes(y = fit0)) +
+  scale_x_log10(breaks = c(10^9, 10^10, 10^11, 10^12, 10^13),
+                labels = c("1", "10", "100", "1000", "10,000")) +
+  scale_y_log10(limits = c(.7, 200), breaks = c(1, 2, 5, 10, 20, 50, 100)) +
+  xlab("Energy Dissipation [GW]") +
+  ylab("Casualty Rate\n [No. of Casualties Per Casualty-Producing Tornado]") +
+  labs(color = expression(paste("Population Density [people/", km^{2}, "]"))) +
+  theme_bw() +
+  theme(legend.position = c(.01, .99),
+        legend.justification = c(.01, .99)) +
+  guides(color = guide_legend(reverse = TRUE))
+```
+
+#### Figure 6 Predicted effect of tornado energy dissipation on casualty rates for given levels of population density (colors). 
+
+Compute the common slope in the above figure (`model0`). Should equal the energy elasticity. Then find the population density at which the energy elasticity of `model1` equals the energy elasticity of `model0`. This is done by interpolation.
+```{r}
+commonSlope = diff(predict(model0, 
+               newdata = data.frame(lpopD = c(2, 2), lED = c(20, 21)),
+               type = "link"))
+commonSlope
+
+slope = numeric()
+for(i in seq(3, 4, .1)){
+slope = c(slope, diff(predict(model1,
+                newdata = data.frame(lpopD = c(i, i), lED = c(20, 21)),
+                type = "link")))
+}
+A = data.frame(popD = exp(seq(3, 4, .1)), slope)
+
+approx(A$slope, A$popD, xout = commonSlope)$y
+```
+
+Model adequacy
+```{r}
+pchisq(model1$deviance, model1$df.residual, lower.tail = FALSE) # model is adequate p-value = .07.
+```
